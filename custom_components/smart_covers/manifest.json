@@ -1,0 +1,12 @@
+{
+  "domain": "smart_covers",
+  "name": "Smart Covers",
+  "codeowners": ["@MatthewOnTour", "@eyalmichon"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/eyalmichon/ha-smart-covers/blob/main/README.md",
+  "iot_class": "assumed_state",
+  "issue_tracker": "https://github.com/eyalmichon/ha-smart-covers/issues",
+  "requirements": [],
+  "version": "1.0.1"
+}
