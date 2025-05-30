@@ -21,7 +21,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.event import async_track_state_change
+from homeassistant.helpers.event import async_track_state_change, async_track_state_change_event
 
 # Import the logger and datetime modules
 import logging
@@ -29,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 import urllib.request
 import json
+from asyncio import Lock
+
 
 
 # Import the TravelCalculator and TravelStatus classes from the calculator module
@@ -60,18 +62,19 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 
 # This function is called by Home Assistant to setup the component
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
-    name = entry.title 
-    device_id = entry.entry_id 
-    async_add_entities([BlindsCover(hass, entry, name, device_id)])
+    name = entry.title
+    device_id = entry.entry_id
+    async_add_entities([SmartCover(hass, entry, name, device_id)])
 
 
 # This class represents a cover entity in Home Assistant
-class BlindsCover(CoverEntity, RestoreEntity):
+class SmartCover(CoverEntity, RestoreEntity):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, name, device_id):
         self.hass = hass    # The Home Assistant instance
         self.entry = entry  # The configuration entry
         self._state = None  # Initialize _state attribute
-        self._available = True  # Initialize _available attribute  
+        self._available = True  # Initialize _available attribute
+        self._position_lock = Lock()
 
         self._travel_time_down = entry.data["time_down"]
         self._travel_time_up = entry.data["time_up"]
@@ -81,41 +84,47 @@ class BlindsCover(CoverEntity, RestoreEntity):
         self._down_switch_entity_id = entry.data["entity_down"]
 
         # Add ons
-        self._timed_control_down = entry.data["timed_control_down"]
-        self._time_to_roll_up = entry.data["time_to_roll_up"]
-        self._timed_control_up = entry.data["timed_control_up"]
-        self._time_to_roll_down = entry.data["time_to_roll_down"]
-        self._delay_control = entry.data["delay_control"]
-        self._delay_sunrise = entry.data["delay_sunrise"]
-        self._delay_sunset = entry.data["delay_sunset"]
-        self._night_lights = entry.data["night_lights"]
-        self._entity_night_lights = entry.data["entity_night_lights"]
-        self._tilting_day = entry.data["tilting_day"]
-        self._protect_the_blinds = entry.data["protect_the_blinds"]
-        self._set_wind_speed = entry.data["wind_speed"]
-        self._wmo_code = entry.data["wmo_code"]
-        self._netamo_enable = entry.data["netamo_enable"]
-        self._netamo_speed_entity = entry.data["netamo_speed_entity"]
+        self._timed_control_down = entry.data.get("timed_control_down", False)
+        self._time_to_roll_up = entry.data.get("time_to_roll_up", "12:00")
+        self._timed_control_up = entry.data.get("timed_control_up", False)
+        self._time_to_roll_down = entry.data.get("time_to_roll_down", "12:00")
+        self._delay_control = entry.data.get("delay_control", False)
+        self._delay_sunrise = entry.data.get("delay_sunrise", 0)
+        self._delay_sunset = entry.data.get("delay_sunset", 0)
+        self._night_lights = entry.data.get("night_lights", False)
+        self._entity_night_lights = entry.data.get("entity_night_lights", None)
+        self._tilting_day = entry.data.get("tilting_day", False)
+        self._protect_the_cover = entry.data.get("protect_the_cover", False)
+        self._set_wind_speed = entry.data.get("wind_speed", 30.0)
+        self._wmo_code = entry.data.get("wmo_code", 80)
+        self._netamo_enable = entry.data.get("netamo_enable", False)
+        self._netamo_speed_entity = entry.data.get("netamo_speed_entity", None)
         if self._netamo_speed_entity is not None:
-            self._wind_speed = self.hass.states.get(self._netamo_speed_entity).state
-        self._netamo_speed = entry.data["netamo_speed"]
-        self._netamo_gust_entity = entry.data["netamo_gust_entity"]
+            wind_state = self.hass.states.get(self._netamo_speed_entity)
+            self._wind_speed = wind_state.state if wind_state else "0"
+        self._netamo_speed = entry.data.get("netamo_speed", 30.0)
+        self._netamo_gust_entity = entry.data.get("netamo_gust_entity", None)
         if self._netamo_gust_entity is not None:
-            self._gust_speed = self.hass.states.get(self._netamo_gust_entity).state
-        self._netamo_gust = entry.data["netamo_gust"]
-        self._send_stop_at_end = entry.data["send_stop_at_end"]
-        self._netamo_rain_entity = entry.data["netamo_rain_entity"]
+            gust_state = self.hass.states.get(self._netamo_gust_entity)
+            self._gust_speed = gust_state.state if gust_state else "0"
+        self._netamo_gust = entry.data.get("netamo_gust", 40.0)
+        self._send_stop_at_end = entry.data.get("send_stop_at_end", True)
+        self._netamo_rain_entity = entry.data.get("netamo_rain_entity", None)
         if self._netamo_rain_entity is not None:
-            self._netamo_cur_rain = self.hass.states.get(self._netamo_rain_entity).state
-        self._netamo_rain = entry.data["netamo_rain"]
+            rain_state = self.hass.states.get(self._netamo_rain_entity)
+            self._netamo_cur_rain = rain_state.state if rain_state else "0"
+        self._netamo_rain = entry.data.get("netamo_rain", 40.0)
 
-        self._sun_next_sunrise = self.hass.states.get("sensor.sun_next_dawn").state
-        self._sun_next_sunset = self.hass.states.get("sensor.sun_next_dusk").state
+        # Safely access sun sensors
+        sun_dawn_state = self.hass.states.get("sensor.sun_next_dawn")
+        sun_dusk_state = self.hass.states.get("sensor.sun_next_dusk")
+        self._sun_next_sunrise = sun_dawn_state.state if sun_dawn_state else "00:00"
+        self._sun_next_sunset = sun_dusk_state.state if sun_dusk_state else "00:00"
 
         self._target_position = 0
         self._target_tilt_position = 0
 
-        self._weather_check_counter = 0 
+        self._weather_check_counter = 0
         self._tilt_check_counter = 0
 
         self._unique_id = device_id
@@ -142,15 +151,18 @@ class BlindsCover(CoverEntity, RestoreEntity):
         self._switch_open_state = "off"
         self._night_lights_state = "off"
 
-    async def sun_state_changed(self, entity_id, old_state, new_state):
-        if new_state is not None:
-            if entity_id == "sensor.sun_next_dawn":
-                self._sun_next_sunrise = new_state.state
-            elif entity_id == "sensor.sun_next_dusk":
-                self._sun_next_sunset = new_state.state
+    async def sun_state_changed(self, event):
+        if event.data.get("new_state") is None:
+            return
 
+        entity_id = event.data.get("entity_id")
+        new_state = event.data.get("new_state")
 
-    
+        if entity_id == "sensor.sun_next_dawn":
+            self._sun_next_sunrise = new_state.state
+        elif entity_id == "sensor.sun_next_dusk":
+            self._sun_next_sunset = new_state.state
+
     # Return the name
     @property
     def name(self):
@@ -160,12 +172,12 @@ class BlindsCover(CoverEntity, RestoreEntity):
     @property
     def unique_id(self):
         return "cover_timebased_synced_uuid_" + self._unique_id
-    
+
     # Return the device class of the cover
     @property
     def device_class(self):
         return None
-    
+
     # The state attributes include various details about the cover (for testing perhaps)
     # Can be removed if not needed in UI
     @property
@@ -178,7 +190,7 @@ class BlindsCover(CoverEntity, RestoreEntity):
             "tilt_open": self._travel_tilt_open,
             "tilt_closed": self._travel_tilt_closed,
         }
-    
+
     # Adds the features of the cover entity
     # OPEN, CLOSE and STOP are always supported
     # If has_tilt_support is True, OPEN_TILT, CLOSE_TILT and STOP_TILT are also supported
@@ -206,7 +218,7 @@ class BlindsCover(CoverEntity, RestoreEntity):
     @property
     def current_cover_position(self) -> int | None:
         return self.travel_calc.current_position()
-    
+
     # Return the current tilt of the cover
     @property
     def current_cover_tilt_position(self) -> float | None:
@@ -215,12 +227,12 @@ class BlindsCover(CoverEntity, RestoreEntity):
         else:
             return None
 
-    # This properties (is_closed, is_opening and is_closing) are needed by the Home Assistant UI 
+    # This properties (is_closed, is_opening and is_closing) are needed by the Home Assistant UI
     # to display the state of the cover correctly
     @property
     def is_closed(self):
         return self.travel_calc.is_closed()
-    
+
     @property
     def is_opening(self):
         return (
@@ -242,12 +254,12 @@ class BlindsCover(CoverEntity, RestoreEntity):
             and self.tilt_calc.is_traveling()
             and self.tilt_calc.travel_direction == TravelStatus.DIRECTION_DOWN
         )
-    
+
     # The cover is available if _available is True
     @property
     def available(self):
-        return self._available  
-    
+        return self._available
+
     # This functions are called while controlling the cover from the Home Assistant UI
     # and are used to open, close, stop, and set the position of the cover
     # Also they call functions to help them with the calculations...
@@ -301,50 +313,55 @@ class BlindsCover(CoverEntity, RestoreEntity):
 
     # This function is called to move the cover to a designated position
     async def set_position(self, position):
-        # Get the current position of the cover
-        current_position = self.travel_calc.current_position()
-        command = None
+        # Acquire the lock to fix race conditions
+        async with self._position_lock:
 
-        # Determine whether to open or close the cover based on the desired position
-        if position < current_position:
-            # If the desired position is less than the current position, close the cover
-            command = SERVICE_CLOSE_COVER
-        elif position > current_position:
-            # If the desired position is greater than the current position, open the cover
-            command = SERVICE_OPEN_COVER
-        if command is not None:
-            self.start_auto_updater()
-            # Start moving the cover to the desired position
-            self.travel_calc.start_travel(position)
-            # Update the tilt of the cover before it starts moving
-            self.update_tilt_before_travel(command)
-            # Execute the open or close command
-            await self._async_handle_command(command)
-        return
-    
+            # Get the current position of the cover
+            current_position = self.travel_calc.current_position()
+            command = None
+
+            # Determine whether to open or close the cover based on the desired position
+            if position < current_position:
+                # If the desired position is less than the current position, close the cover
+                command = SERVICE_CLOSE_COVER
+            elif position > current_position:
+                # If the desired position is greater than the current position, open the cover
+                command = SERVICE_OPEN_COVER
+            if command is not None:
+                self.start_auto_updater()
+                # Start moving the cover to the desired position
+                self.travel_calc.start_travel(position)
+                # Update the tilt of the cover before it starts moving
+                self.update_tilt_before_travel(command)
+                # Execute the open or close command
+                await self._async_handle_command(command)
+            return
+
     # This function is called to move the cover tilt to a designated position
     async def set_tilt_position(self, position):
-        # Get the current tilt position
-        current_position = self.tilt_calc.current_position()
-        command = None
+        # Acquire the lock to fix race conditions
+        async with self._position_lock:
+            # Get the current tilt position
+            current_position = self.tilt_calc.current_position()
+            command = None
 
-        # Determine whether to open or close the cover based on the desired position
-        if position < current_position:
-            # If the desired position is less than the current position, close the cover
-            command = SERVICE_CLOSE_COVER
-        elif position > current_position:
-            # If the desired position is greater than the current position, open the cover
-            command = SERVICE_OPEN_COVER
+            # Determine whether to open or close the cover based on the desired position
+            if position < current_position:
+                # If the desired position is less than the current position, close the cover
+                command = SERVICE_CLOSE_COVER
+            elif position > current_position:
+                # If the desired position is greater than the current position, open the cover
+                command = SERVICE_OPEN_COVER
 
-        if command is not None:
-            self.start_auto_updater()
-            # Start moving the tilt to the desired position
-            self.tilt_calc.start_travel(position)
-            # Execute the open or close command
-            await self._async_handle_command(command)
+            if command is not None:
+                self.start_auto_updater()
+                # Start moving the tilt to the desired position
+                self.tilt_calc.start_travel(position)
+                # Execute the open or close command
+                await self._async_handle_command(command)
 
-        # The function does not return anything
-        return
+            # The function does not return anything
+            return
 
     # This function is called to update the tilt before travel
     def update_tilt_before_travel(self, command):
@@ -353,7 +370,7 @@ class BlindsCover(CoverEntity, RestoreEntity):
                 self.tilt_calc.start_travel_up()
             elif command == SERVICE_CLOSE_COVER:
                 self.tilt_calc.start_travel_down()
-    
+
 
     def stop_auto_updater(self):
         self._target_position = 0
@@ -386,14 +403,14 @@ class BlindsCover(CoverEntity, RestoreEntity):
         if self._timed_control_down and not self.travel_calc.is_traveling():
             try:
                 parsed_time_to_roll_down = datetime.strptime(self._time_to_roll_down, "%H:%M")
-                formatted_time_to_roll_down = parsed_time_to_roll_down.strftime("%H:%M")  
+                formatted_time_to_roll_down = parsed_time_to_roll_down.strftime("%H:%M")
             except ValueError:
                 _LOGGER.error("Invalid format for timed control")
                 return
-            
+
             if formatted_time_to_roll_down == formatted_time and self.travel_calc.current_position() > 0:
                 await self.async_close_cover()
-        
+
         if self._timed_control_up and not self.travel_calc.is_traveling():
             try:
                 parsed_time_to_roll_up = datetime.strptime(self._time_to_roll_up, "%H:%M")
@@ -401,7 +418,7 @@ class BlindsCover(CoverEntity, RestoreEntity):
             except ValueError:
                 _LOGGER.error("Invalid format for timed control")
                 return
-            
+
             if formatted_time_to_roll_up == formatted_time and self.travel_calc.current_position() < 100:
                 await self.async_open_cover()
 
@@ -436,7 +453,7 @@ class BlindsCover(CoverEntity, RestoreEntity):
 
             if (formatted_time > formatted_time_sunset or formatted_time < formatted_time_sunrise) and self._night_lights_state == "on" and self.travel_calc.current_position() > 0:
                 await self.async_close_cover()
-        
+
         if self.has_tilt_support():
             self._tilt_check_counter += 1
             if self._tilt_check_counter == 10:
@@ -469,31 +486,31 @@ class BlindsCover(CoverEntity, RestoreEntity):
             elif self._netamo_cur_rain > self._netamo_rain and self.travel_calc.current_position() < 100:
                 await self.async_open_cover()
 
-        _LOGGER.info("self._protect_the_blinds: %s", self._protect_the_blinds)
-        if self._protect_the_blinds and not self.travel_calc.is_traveling():
+        _LOGGER.info("self._protect_the_cover: %s", self._protect_the_cover)
+        if self._protect_the_cover and not self.travel_calc.is_traveling():
                     self._weather_check_counter += 1
                      # Check if the counter reaches 30
                     if self._weather_check_counter == 30:
                         self._weather_check_counter = 0
                         latitude, longitude = self.get_location_coordinates(self.hass)
                         _LOGGER.info("Latitude: %s, Longitude: %s", latitude, longitude)
-                        
+
                         # Construct the API URL
                         api_url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=wind_speed_10m&daily=weather_code"
-                        
+
                         try:
                             # Make the request asynchronously
                             response = await self.hass.async_add_executor_job(urllib.request.urlopen, api_url)
                             data = json.loads(response.read().decode('utf-8'))
                             _LOGGER.info("Retrieved data: %s", data)
-                            
+
                             # Extract wind speed and weather code
                             current_data = data.get('current', {})
                             wind_speed = current_data.get('wind_speed_10m')
-                            
+
                             daily_data = data.get('daily', {})
                             weather_code = daily_data.get('weather_code')
-                            
+
                             if wind_speed > self._set_wind_speed and self.travel_calc.current_position() < 100:
                                 await self.async_open_cover()
                                 _LOGGER.info("Wind speed is too high: %s", wind_speed)
@@ -501,15 +518,15 @@ class BlindsCover(CoverEntity, RestoreEntity):
                             if today_weather_code > self._wmo_code and self.travel_calc.current_position() < 100:
                                 await self.async_open_cover()
                                 _LOGGER.info("Weather code indicates rain: %s", weather_code)
-                            
+
                             _LOGGER.info("Wind speed: %s, Weather code: %s", wind_speed, weather_code)
-                            
+
                         except Exception as e:
                             _LOGGER.error("Error retrieving weather data: %s", e)
 
-        _LOGGER.info("Current time: %s", formatted_time)   
-                
-        
+        _LOGGER.info("Current time: %s", formatted_time)
+
+
     # This function is called to get latitude and longitude from Home Assistant configuration
     def get_location_coordinates(self, hass):
         # Access the latitude and longitude from Home Assistant configuration
@@ -522,10 +539,10 @@ class BlindsCover(CoverEntity, RestoreEntity):
         return self.travel_calc.position_reached() and (
             not self.has_tilt_support() or self.tilt_calc.position_reached()
         )
-    
-    # This function is called to check if the cover supports tilt 
+
+    # This function is called to check if the cover supports tilt
     # based on the user input in the configuration flow or option flow
-    # Returns True if the cover supports tilt, False otherwise  
+    # Returns True if the cover supports tilt, False otherwise
     def has_tilt_support(self):
         return (
             self.entry.data.get("tilt_open") is not None
@@ -533,7 +550,7 @@ class BlindsCover(CoverEntity, RestoreEntity):
             and self._travel_tilt_open != 0
             and self._travel_tilt_closed != 0
         )
-    
+
     async def _handle_state_changed(self, event):
         if event.data.get("new_state") is None:
             return
@@ -543,7 +560,7 @@ class BlindsCover(CoverEntity, RestoreEntity):
 
         if event.data.get("new_state").state == event.data.get("old_state").state:
             return
-        
+
         if event.data.get("entity_id") == self._entity_night_lights:
             if self._night_lights_state == event.data.get("new_state").state:
                 return
@@ -604,21 +621,21 @@ class BlindsCover(CoverEntity, RestoreEntity):
                     self.start_auto_updater()
         # Update state of entity
         self.async_write_ha_state()
-            
+
 
     async def async_added_to_hass(self):
-        self.hass.bus.async_listen("state_changed", self._handle_state_changed)
+        # Track state change listener
+        self._state_changed_listener = async_track_state_change_event(self.hass, [self._up_switch_entity_id, self._down_switch_entity_id] , self._handle_state_changed)
         # Set up periodic time update
         self.hass.helpers.event.async_track_time_interval(self.add_ons, timedelta(minutes=1))
-        async_track_state_change(
-            self.hass, "sensor.sun_next_dawn", self.sun_state_changed
+        # Use async_track_state_change_event instead of async_track_state_change
+        self._sun_dawn_listener = async_track_state_change_event(
+            self.hass, ["sensor.sun_next_dawn"], self.sun_state_changed
         )
-        async_track_state_change(
-            self.hass, "sensor.sun_next_dusk", self.sun_state_changed
+        self._sun_dusk_listener = async_track_state_change_event(
+            self.hass, ["sensor.sun_next_dusk"], self.sun_state_changed
         )
 
-
-        
         old_state = await self.async_get_last_state()
 
         if (old_state is not None and self.travel_calc is not None and old_state.attributes.get(ATTR_CURRENT_POSITION) is not None):
@@ -634,13 +651,27 @@ class BlindsCover(CoverEntity, RestoreEntity):
                     int(old_state.attributes.get(ATTR_CURRENT_TILT_POSITION))
                 )
 
+    async def async_will_remove_from_hass(self):
+        """Cleanup when the entity is removed."""
+        if hasattr(self, "_state_changed_listener"):
+            self._state_changed_listener()  # Unsubscribe the state change listener
+            del self._state_changed_listener
+
+        if hasattr(self, "_sun_dawn_listener"):
+            self._sun_dawn_listener()  # Unsubscribe the sun dawn listener
+            del self._sun_dawn_listener
+
+        if hasattr(self, "_sun_dusk_listener"):
+            self._sun_dusk_listener()  # Unsubscribe the sun dusk listener
+            del self._sun_dusk_listener
+
     def _handle_my_button(self):
         if self.travel_calc.is_traveling() or (self.has_tilt_support() and self.tilt_calc.is_traveling()):
             self.travel_calc.stop()
             if self.has_tilt_support():
                 self.tilt_calc.stop()
             self.stop_auto_updater()
-        
+
 
     # This function is called to stop the cover if it has reached its final position
     async def auto_stop_if_necessary(self):
