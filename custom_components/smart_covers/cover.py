@@ -392,6 +392,9 @@ class SmartCover(CoverEntity, RestoreEntity):
             self.stop_auto_updater()
         self.hass.async_create_task(self.auto_stop_if_necessary())
 
+    def should_use_add_ons_event(self):
+        return self._timed_control_down or self._timed_control_up or self._delay_control or self._night_lights or self._netamo_enable or self._protect_the_cover
+
     async def add_ons(self, now):
         # Adjust the current time by adding one hour
         corrected_time = now + timedelta(hours=0) # Edit the time if needed to correct the time zone
@@ -627,14 +630,14 @@ class SmartCover(CoverEntity, RestoreEntity):
         # Track state change listener
         self._state_changed_listener = async_track_state_change_event(self.hass, [self._up_switch_entity_id, self._down_switch_entity_id] , self._handle_state_changed)
         # Set up periodic time update
-        self.hass.helpers.event.async_track_time_interval(self.add_ons, timedelta(minutes=1))
+        if self.should_use_add_ons_event():
+            self._add_ons_listener = self.hass.helpers.event.async_track_time_interval(self.add_ons, timedelta(minutes=1))
         # Use async_track_state_change_event instead of async_track_state_change
-        self._sun_dawn_listener = async_track_state_change_event(
-            self.hass, ["sensor.sun_next_dawn"], self.sun_state_changed
-        )
-        self._sun_dusk_listener = async_track_state_change_event(
-            self.hass, ["sensor.sun_next_dusk"], self.sun_state_changed
-        )
+        if self._delay_control:
+            if self._sun_next_dawn is not None:
+                self._sun_dawn_listener = async_track_state_change_event(self.hass, ["sensor.sun_next_dawn"], self.sun_state_changed)
+            if self._sun_next_dusk is not None:
+                self._sun_dusk_listener = async_track_state_change_event(self.hass, ["sensor.sun_next_dusk"], self.sun_state_changed)
 
         old_state = await self.async_get_last_state()
 
@@ -642,20 +645,19 @@ class SmartCover(CoverEntity, RestoreEntity):
             self.travel_calc.set_position(int(old_state.attributes.get(ATTR_CURRENT_POSITION)))
 
             # If the cover supports tilt and the old state has a current tilt position attribute
-            if (
-                self.has_tilt_support()
-                and old_state.attributes.get(ATTR_CURRENT_TILT_POSITION) is not None
-            ):
+            if (self.has_tilt_support() and old_state.attributes.get(ATTR_CURRENT_TILT_POSITION) is not None):
                 # Set the position of the tilt calculator to the old state's current tilt position
-                self.tilt_calc.set_position(
-                    int(old_state.attributes.get(ATTR_CURRENT_TILT_POSITION))
-                )
+                self.tilt_calc.set_position(int(old_state.attributes.get(ATTR_CURRENT_TILT_POSITION)))
 
     async def async_will_remove_from_hass(self):
         """Cleanup when the entity is removed."""
         if hasattr(self, "_state_changed_listener"):
             self._state_changed_listener()  # Unsubscribe the state change listener
             del self._state_changed_listener
+
+        if hasattr(self, "_add_ons_listener"):
+            self._add_ons_listener()  # Unsubscribe the add ons listener
+            del self._add_ons_listener
 
         if hasattr(self, "_sun_dawn_listener"):
             self._sun_dawn_listener()  # Unsubscribe the sun dawn listener
