@@ -12,10 +12,6 @@ class SmartCoversConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     CONNECTION_CLASS = config_entries.CONN_CLASS_CLOUD_POLL
 
-    @callback
-    def _get_entity_ids(self):
-        return self.hass.states.async_entity_ids()
-
     async def async_step_user(self, user_input=None):
         errors = {}
 
@@ -117,18 +113,12 @@ class SmartCoversConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return SmartCoversOptionsFlow(config_entry)
+        return SmartCoversOptionsFlow()
 
 
 class SmartCoversOptionsFlow(config_entries.OptionsFlow):
     """Handle updates to an existing entry (async_step_init)."""
 
-    def __init__(self, config_entry):
-        self.config_entry = config_entry
-
-    @callback
-    def _get_entity_ids(self):
-        return self.hass.states.async_entity_ids()
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
